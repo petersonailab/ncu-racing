@@ -107,44 +107,51 @@ class Racer {
     this.car = new Vehicle({ ...SPEC, a: carTemplate.a, b: carTemplate.b, wheelRadius: carTemplate.wheelRadius });
     this.visual = new CarVisual(carTemplate, color);
     scene.add(this.visual.body);
-    this.idx = -1; this.s = 0; this.lateral = 0; this.lap = 0; this.maxS = 0;
-    this.lapStart = 0; this.lapTimes = []; this.finishTime = null; this.backCross = false;
-    this.waterTime = 0; this.wrongWay = 0; this.lastWheel = [null, null];
+    this.idx = -1; this.s = 0; this.prog = 0; this.lateral = 0; this.lap = 0;
+    this.lapStart = 0; this.lapTimes = []; this.finishTime = null;
+    this.waterTime = 0; this.wrongWay = 0; this.offCourse = 0; this.lastWheel = [null, null];
   }
-  get progress() { return this.finishTime !== null ? 1e9 - this.finishTime : this.lap === 0 ? this.s - track.length : (this.lap - 1) * track.length + this.s; }
+  // race order: completed laps plus the validated distance into the current lap
+  get progress() { return this.finishTime !== null ? 1e9 - this.finishTime : this.lap === 0 ? this.prog - track.length : (this.lap - 1) * track.length + this.prog; }
   place(slot) {
     this.car.reset(slot.x, slot.z, slot.yaw);
-    this.idx = -1; this.updateTracking(true);
-    this.lap = 0; this.maxS = this.s; this.lapTimes = []; this.finishTime = null; this.lastWheel = [null, null];
+    const pr = track.project(slot.x, slot.z);
+    this.idx = pr.index; this.s = this.prog = pr.s; this.lateral = pr.lateral;
+    this.lap = 0; this.lapTimes = []; this.finishTime = null; this.offCourse = 0; this.lastWheel = [null, null];
   }
+  // back onto the racing line where the lap was last driven properly
   respawn() {
-    const p = track.pointAt(this.s, Math.max(-2.5, Math.min(2.5, this.lateral)));
+    const off = Math.max(-2.5, Math.min(2.5, track.lineOffset(this.prog)));
+    const p = track.pointAt(this.prog, off);
     this.car.reset(p.x, p.z, Math.atan2(p.tx, p.tz));
     this.car.gear = 1; this.lastWheel = [null, null];
+    this.idx = p.i; this.s = this.prog; this.lateral = off; this.offCourse = 0;
   }
-  updateTracking(init = false) {
-    const c = this.car;
-    let pr = track.project(c.x, c.z, this.idx, 40);
-    if (pr.dist > 45) pr = track.project(c.x, c.z, -1);
-    const prevS = this.s; this.idx = pr.index; this.s = pr.s; this.lateral = pr.lateral;
-    if (init) return;
-    const L = track.length;
-    if (prevS > L - 60 && this.s < 60) {            // crossed the line forwards
-      if (this.backCross) this.backCross = false;
-      else if (this.lap === 0) { this.lap = 1; this.lapStart = raceTime; }
-      else if (this.maxS > L * 0.85) {
-        const t = raceTime - this.lapStart;
-        this.lapTimes.push(t); this.lapStart = raceTime; this.lap++;
-        if (this.isPlayer) onPlayerLap(t);
-        if (this.lap > lapsTotal && this.finishTime === null) { this.finishTime = raceTime; if (this.isPlayer) onPlayerFinish(); }
-      }
-      this.maxS = this.s;
-    } else if (prevS < 60 && this.s > L - 60) {     // reversed over the line
-      this.backCross = true;
-    } else if (this.s > this.maxS && this.s - this.maxS < 50) this.maxS = this.s;
-    // wrong way detection
+  // `prog` (validated distance into the lap) only moves forward while the car follows the course —
+  // within 25 m of the track and never jumping ahead — so a skipped section has to be driven
+  // before the line counts. `s` is the raw nearest point, searched around `prog`.
+  updateTracking() {
+    const c = this.car, L = track.length;
+    const pr = track.project(c.x, c.z, track.indexAt(this.prog), 40);
+    this.idx = pr.index; this.s = pr.s; this.lateral = pr.lateral;
+    let d = this.s - this.prog;
+    if (d < -L / 2) d += L; else if (d > L / 2) d -= L;
+    if (pr.dist < 25 && d > 0 && d < 40) {
+      const before = this.prog;
+      this.prog = this.s;
+      if (before > L - 40 && this.prog < 40) this.crossLine();
+    }
+    const gp = track.pointAt(this.prog);
+    this.offCourse = Math.hypot(c.x - gp.x, c.z - gp.z) > 30 ? this.offCourse + DT : 0;
     const i = this.idx, dot = c.vx * track.tx[i] + c.vz * track.tz[i];
     this.wrongWay = dot < -3 ? this.wrongWay + DT : 0;
+  }
+  crossLine() {
+    if (this.lap === 0) { this.lap = 1; this.lapStart = raceTime; return; } // leaving the grid
+    const t = raceTime - this.lapStart;
+    this.lapTimes.push(t); this.lapStart = raceTime; this.lap++;
+    if (this.isPlayer) onPlayerLap(t);
+    if (this.lap > lapsTotal && this.finishTime === null) { this.finishTime = raceTime; if (this.isPlayer) onPlayerFinish(); }
   }
 }
 
@@ -324,7 +331,8 @@ function onPlayerLap(t) {
 function onPlayerFinish() {
   if (raceType === 'mp') net.send({ t: 'finish', time: player.finishTime, best: Math.min(...player.lapTimes) });
   mode = 'done'; doneTimer = 0;
-  toast('完賽！', 2500);
+  const pos = standings().findIndex(r => r.me) + 1;
+  toast(`完賽！第 ${pos} 名 · ${fmt(player.finishTime)}`, 3000);
 }
 
 function standings() {
@@ -411,6 +419,10 @@ function drawMinimap() {
   const dot = (x, z, col, r) => { const [px, py] = M(x, z); mctx.fillStyle = col; mctx.beginPath(); mctx.arc(px, py, r, 0, 7); mctx.fill(); mctx.strokeStyle = '#000'; mctx.lineWidth = 1.5; mctx.stroke(); };
   for (const r of racers) if (!r.isPlayer) dot(r.car.x, r.car.z, '#' + r.visual.paint.color.getHexString(), 4.5);
   for (const rc of remotes.values()) { const p = rc.sample(); if (p) dot(p.x, p.z, '#' + rc.visual.paint.color.getHexString(), 4.5); }
+  if (player?.offCourse > 0.8) { // where to rejoin the course
+    const p = track.pointAt(player.prog), [px, py] = M(p.x, p.z);
+    mctx.strokeStyle = '#ff4136'; mctx.lineWidth = 3; mctx.beginPath(); mctx.arc(px, py, 8 + (performance.now() / 120) % 6, 0, 7); mctx.stroke();
+  }
   if (player) dot(player.car.x, player.car.z, '#ffd23f', 6.5);
 }
 
@@ -433,6 +445,7 @@ function updateHUD(dt) {
   $('pos').innerHTML = `${pos}<small>/${st.length}</small>`;
   $('board').innerHTML = st.length > 1 ? st.map((r, i) => `<div class="${r.me ? 'me' : ''}"><b>${i + 1}</b>${esc(r.name)}</div>`).join('') : '';
   $('wrongway').classList.toggle('hidden', player.wrongWay < 1.5);
+  $('offcourse').classList.toggle('hidden', !(player.offCourse > 0.8 && player.finishTime === null));
   $('surface').textContent = c.surface === 'grass' ? '草地' : c.surface === 'water' ? '落水！' : '';
   $('tc').classList.toggle('off', !c.tc);
   $('tc').classList.toggle('active', c.tc && c.assistActive);
@@ -510,7 +523,7 @@ function draw(dt, now) {
   }
   updateCamera(dt);
   world.updateLabels(camera.position);
-  guide.update(player?.car, player?.s ?? 0, !!player && settings.guide && mode !== 'menu' && player.finishTime === null);
+  guide.update(player?.car, player?.prog ?? 0, !!player && settings.guide && mode !== 'menu' && player.finishTime === null);
   if (player) {
     const p = player.car, snap = 2 * SH / sunLight.shadow.mapSize.x;
     const cx = Math.round(p.x / snap) * snap, cz = Math.round(p.z / snap) * snap;
