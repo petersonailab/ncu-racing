@@ -5,15 +5,15 @@ const G = 9.81;
 export const SPEC = {
   mass: 1450, inertia: 2300,
   a: 1.25, b: 1.42,            // CG to front / rear axle (m); overwritten from the model
-  cgHeight: 0.42,
+  cgHeight: 0.38,
   wheelRadius: 0.345,
   maxSteer: 0.58,
   gears: [3.25, 2.35, 1.8, 1.42, 1.15, 0.95, 0.8], reverse: 3.0, finalDrive: 3.36,
   idleRpm: 1100, redline: 8250, upshift: 7900, downshift: 3600,
   peakTorque: 900, drivetrainEff: 0.88,
   brakeForce: 17500, cdA: 0.36, rollRes: 14,
-  tyreB: 9.5, tyreC: 1.45,     // simplified Pacejka shape
-  mu: 1.32,
+  tyreB: 14, tyreC: 1.4,       // simplified Pacejka shape: grip peaks near 8.5° slip, ~80% left when sliding
+  mu: 1.38, rearGrip: 1.1,     // wider rear tyres give a stable, slightly understeering balance
 };
 
 const SURFACE = {
@@ -37,7 +37,7 @@ export class Vehicle {
     this.steer = 0; this.gear = 1; this.rpm = this.spec?.idleRpm ?? 1000;
     this.shiftTimer = 0; this.ax = 0; this.ay = 0;
     this.wheelAngle = 0; this.slipFront = 0; this.slipRear = 0; this.wheelspin = 0;
-    this.surface = 'track'; this.throttleOut = 0;
+    this.surface = 'track'; this.throttleOut = 0; this.assistActive = false;
   }
 
   get speed() { return Math.hypot(this.vF, this.vL); }
@@ -48,6 +48,13 @@ export class Vehicle {
     const s = Math.sin(this.yaw), c = Math.cos(this.yaw);
     this.vF = vx * s + vz * c;
     this.vL = vx * c - vz * s;
+  }
+
+  // Speed-sensitive lock: at speed, full steering asks a little more than the tyres can give
+  // (instead of several times more), so keyboard players don't overwhelm the front end.
+  steerLimit(v = this.speed) {
+    const S = this.spec;
+    return Math.min(S.maxSteer, 1.25 * (S.a + S.b) * S.mu * G / Math.max(v * v, 1) + 0.05);
   }
 
   torque(rpm) {
@@ -65,8 +72,7 @@ export class Vehicle {
     const speed = this.speed;
 
     // --- steering: speed-sensitive limit and rate ---
-    const steerLimit = S.maxSteer / (1 + speed / 16);
-    const target = inp.steer * steerLimit;
+    const target = inp.steer * this.steerLimit(speed);
     const rate = 3.2 * dt;
     this.steer += Math.max(-rate, Math.min(rate, target - this.steer));
     const delta = this.steer;
@@ -92,6 +98,10 @@ export class Vehicle {
     const Fzr = Math.max(0, m * G * S.a / L + S.cgHeight / L * m * this.ax);
     const mu = S.mu * surf.mu;
 
+    // --- brakes (62/38 front bias); braking uses up part of each axle's grip ---
+    const braking = reversing ? inp.throttle : inp.brake;
+    const brakeMag = braking > 0 && Math.abs(this.vF) > 0.05 ? Math.min(S.brakeForce * braking, mu * (Fzf + Fzr) * 0.98) : 0;
+
     // --- tyre slip angles ---
     // below walking pace the kinematic model steers the car, so tyre side forces fade out
     const kBlend = Math.min(1, Math.max(0, (Math.abs(this.vF) - 1.5) / 3));
@@ -101,10 +111,18 @@ export class Vehicle {
     const alphaR = Math.atan2(this.vL - S.b * this.r, vAbs);
     const pac = (alpha, D) => -D * Math.sin(S.tyreC * Math.atan(S.tyreB * alpha));
 
-    let gripR = mu * Fzr;
+    let gripR = mu * Fzr * S.rearGrip;
     if (inp.handbrake > 0) gripR *= 0.45;
-    let FyF = pac(alphaF, mu * Fzf) * kBlend;
-    let FyR = pac(alphaR, gripR) * kBlend;
+    const gripF = mu * Fzf;
+    const latF = Math.sqrt(Math.max(0, gripF * gripF - (brakeMag * 0.62) ** 2));
+    const latR = Math.sqrt(Math.max(0, gripR * gripR - (brakeMag * 0.38) ** 2));
+    let FyF = pac(alphaF, latF) * kBlend;
+    let FyR = pac(alphaR, latR) * kBlend;
+
+    // assists (TC button) stand down while the handbrake is held, so drifting still works
+    const assist = this.tc && !inp.handbrake;
+    const slipPeak = Math.tan(Math.PI / (2 * S.tyreC)) / S.tyreB;
+    const rearSlide = Math.max(0, Math.abs(alphaR) - slipPeak) / slipPeak; // 0 while the rear grips
 
     // --- longitudinal forces ---
     let drive = 0;
@@ -117,24 +135,36 @@ export class Vehicle {
     // traction circle on the driven (rear) axle
     const availR = Math.sqrt(Math.max(0, gripR * gripR - FyR * FyR));
     this.wheelspin = 0;
-    if (Math.abs(drive) > availR) {
-      if (this.tc) drive = Math.sign(drive) * availR * 0.98;
-      else { this.wheelspin = Math.min(1, (Math.abs(drive) - availR) / availR); drive = Math.sign(drive) * availR; FyR *= 0.6; }
+    let powerCut = 0;
+    if (assist) {
+      // traction control: keep a grip reserve on the driven axle and back off while the rear slides
+      const asked = Math.abs(drive);
+      if (asked > availR * 0.85) drive = Math.sign(drive) * availR * 0.85;
+      drive *= Math.max(0.1, 1 - rearSlide * 3);
+      powerCut = asked > 0 ? 1 - Math.abs(drive) / asked : 0;
+    } else if (Math.abs(drive) > availR) {
+      this.wheelspin = Math.min(1, (Math.abs(drive) - availR) / Math.max(availR, 1));
+      drive = Math.sign(drive) * availR; FyR *= 0.6;
     }
     this.throttleOut = throttle;
 
-    let brakeF = 0;
-    const braking = reversing ? inp.throttle : inp.brake;
-    if (braking > 0 && Math.abs(this.vF) > 0.05) {
-      brakeF = Math.min(S.brakeForce * braking, mu * (Fzf + Fzr) * 0.98) * Math.sign(this.vF);
-    }
+    let brakeF = brakeMag * Math.sign(this.vF);
     if (inp.handbrake > 0 && Math.abs(this.vF) > 0.05) brakeF += Math.min(4500, gripR) * Math.sign(this.vF);
 
     const drag = S.cdA * 0.5 * 1.2 * this.vF * Math.abs(this.vF) * 1.6 + S.rollRes * this.vF + surf.drag * m * G * Math.tanh(this.vF * 2);
 
     const Fx = drive - brakeF - FyF * Math.sin(delta) - drag;
     const Fl = FyF * Math.cos(delta) + FyR;
-    const tau = S.a * FyF * Math.cos(delta) - S.b * FyR;
+    // stability control: counter-yaw when the rear steps out, and cap the yaw rate at what grip can sustain
+    let tauESC = 0;
+    if (assist && speed > 5) {
+      const over = alphaR - Math.max(-slipPeak, Math.min(slipPeak, alphaR));
+      tauESC += over * S.inertia * 45;
+      const rMax = mu * G * 1.15 / speed;
+      tauESC -= (this.r - Math.max(-rMax, Math.min(rMax, this.r))) * S.inertia * 25;
+    }
+    this.assistActive = powerCut > 0.15 || Math.abs(tauESC) > 300;
+    const tau = S.a * FyF * Math.cos(delta) - S.b * FyR + tauESC;
 
     // --- integrate in the body frame ---
     const ax = Fx / m, al = Fl / m;
@@ -168,7 +198,7 @@ export class Vehicle {
 
   // Positive when the tyres are sliding enough to squeal / leave marks.
   get skid() {
-    const lat = Math.max(0, Math.max(this.slipRear, this.slipFront * 0.8) - 0.12) * 4;
+    const lat = Math.max(0, Math.max(this.slipRear, this.slipFront * 0.8) - 0.1) * 4;
     const lon = this.wheelspin + (this.input.brake > 0.8 && this.speed > 15 ? 0.3 : 0);
     return Math.min(1, (lat + lon) * Math.min(1, this.speed / 8));
   }

@@ -8,7 +8,6 @@ export class Track {
     this.s = new Float32Array(n);   // cumulative distance at each point
     this.tx = new Float32Array(n);  // unit tangent
     this.tz = new Float32Array(n);
-    this.curv = new Float32Array(n); // signed curvature (+ = turning left)
     let acc = 0;
     for (let i = 0; i < n; i++) {
       this.s[i] = acc;
@@ -21,25 +20,49 @@ export class Track {
       const dx = b.x - a.x, dz = b.z - a.z, l = Math.hypot(dx, dz) || 1;
       this.tx[i] = dx / l; this.tz[i] = dz / l;
     }
-    // curvature from heading change over +-3 points (smoother than neighbours)
-    for (let i = 0; i < n; i++) {
-      const i0 = (i - 3 + n) % n, i1 = (i + 3) % n;
-      const h0 = Math.atan2(this.tx[i0], this.tz[i0]), h1 = Math.atan2(this.tx[i1], this.tz[i1]);
-      let dh = h1 - h0; while (dh > Math.PI) dh -= 2 * Math.PI; while (dh < -Math.PI) dh += 2 * Math.PI;
-      this.curv[i] = dh / this.dist(i0, i1);
-    }
+    this.curv = curvature(this.pts.map(p => p.x), this.pts.map(p => p.z));
+    this.buildRacingLine(this.width / 2 - 1.3);
     this.buildSpeedProfile(1.15 * 9.81, 9.0, 85);
   }
 
   dist(i0, i1) { let d = this.s[i1] - this.s[i0]; if (d <= 0) d += this.length; return d; }
 
-  // Max cornering speed limited by lateral grip, then braking/acceleration limits (two passes).
+  // Minimum-curvature racing line (outside - apex - outside): relax every point toward the chord
+  // midpoint of its neighbours, coarse spacing first, clamped to the usable track width.
+  buildRacingLine(maxOff) {
+    const n = this.n, off = this.lineOff = new Float32Array(n);
+    const X = this.lx = new Float32Array(n), Z = this.lz = new Float32Array(n);
+    const place = (i) => { const p = this.pts[i]; X[i] = p.x + this.tz[i] * off[i]; Z[i] = p.z - this.tx[i] * off[i]; };
+    for (let i = 0; i < n; i++) place(i);
+    for (const k of [32, 16, 8, 4, 2, 1]) {
+      for (let it = 0; it < 120; it++) {
+        for (let i = 0; i < n; i++) {
+          const a = (i - k + n) % n, b = (i + k) % n, p = this.pts[i];
+          const target = ((X[a] + X[b]) / 2 - p.x) * this.tz[i] - ((Z[a] + Z[b]) / 2 - p.z) * this.tx[i];
+          off[i] = Math.max(-maxOff, Math.min(maxOff, off[i] + (target - off[i]) * 0.6));
+          place(i);
+        }
+      }
+    }
+    this.lcurv = curvature(X, Z);
+  }
+
+  // Lateral offset of the racing line from the centre line at distance s.
+  lineOffset(s) {
+    s = ((s % this.length) + this.length) % this.length;
+    const i = this.indexAt(s), j = (i + 1) % this.n;
+    const t = (s - this.s[i]) / this.dist(i, j);
+    return this.lineOff[i] + (this.lineOff[j] - this.lineOff[i]) * t;
+  }
+
+  // Safe speed along the racing line: cornering grip limit, then a backwards braking pass.
   buildSpeedProfile(latAcc, brake, vmax) {
     const n = this.n, v = this.speed = new Float32Array(n);
-    for (let i = 0; i < n; i++) v[i] = Math.min(vmax, Math.sqrt(latAcc / Math.max(Math.abs(this.curv[i]), 1e-4)));
-    for (let pass = 0; pass < 3; pass++) {
-      for (let k = 2 * n; k > 0; k--) { // backwards: can we brake in time?
-        const i = k % n, j = (k - 1) % n, d = this.dist(j, i);
+    for (let i = 0; i < n; i++) v[i] = Math.min(vmax, Math.sqrt(latAcc / Math.max(Math.abs(this.lcurv[i]), 1e-4)));
+    for (let pass = 0; pass < 2; pass++) {
+      for (let k = 2 * n; k > 0; k--) {
+        const i = k % n, j = (k - 1) % n;
+        const d = Math.hypot(this.lx[i] - this.lx[j], this.lz[i] - this.lz[j]);
         v[j] = Math.min(v[j], Math.sqrt(v[i] * v[i] + 2 * brake * d));
       }
     }
@@ -84,4 +107,19 @@ export class Track {
   }
 
   heading(i) { return Math.atan2(this.tx[i], this.tz[i]); }
+}
+
+// Signed curvature (+ = turning left) of a closed polyline, from the heading change over +-3 points.
+function curvature(X, Z) {
+  const n = X.length, out = new Float32Array(n);
+  const heading = (i) => { const a = (i - 1 + n) % n, b = (i + 1) % n; return Math.atan2(X[b] - X[a], Z[b] - Z[a]); };
+  for (let i = 0; i < n; i++) {
+    const i0 = (i - 3 + n) % n, i1 = (i + 3) % n;
+    let dh = heading(i1) - heading(i0);
+    while (dh > Math.PI) dh -= 2 * Math.PI; while (dh < -Math.PI) dh += 2 * Math.PI;
+    let d = 0;
+    for (let k = i0; k !== i1; k = (k + 1) % n) d += Math.hypot(X[(k + 1) % n] - X[k], Z[(k + 1) % n] - Z[k]);
+    out[i] = dh / d;
+  }
+  return out;
 }

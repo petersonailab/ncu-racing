@@ -5,6 +5,7 @@ import { World, TRACK_Y } from './world.js';
 import { Vehicle, SPEC } from './vehicle.js';
 import { loadCarTemplate, CarVisual } from './carModel.js';
 import { AIDriver } from './ai.js';
+import { DrivingLine } from './guide.js';
 import { GameAudio } from './audio.js';
 import { Net, RemoteCar } from './net.js';
 
@@ -14,7 +15,7 @@ const AI_NAMES = ['松濤', '百花川', '中大湖', '太極', '鹿林', '依�
 const COLORS = [0xff7a00, 0x1f6fd1, 0xd8d8d8, 0xc81d25, 0x1a8f4c, 0xf2c200, 0x7a3fc4, 0x111111];
 
 // ---------------- settings ----------------
-const settings = Object.assign({ name: '中大車手', laps: 3, ai: 5, quality: 'high', labels: true, tc: true, color: 0 },
+const settings = Object.assign({ name: '中大車手', laps: 3, ai: 5, quality: 'high', labels: true, tc: true, guide: true, color: 0 },
   JSON.parse(localStorage.getItem('ncu_settings') || '{}'));
 const saveSettings = () => localStorage.setItem('ncu_settings', JSON.stringify(settings));
 const bestLaps = JSON.parse(localStorage.getItem('ncu_best') || '{}');
@@ -88,7 +89,7 @@ class SkidMarks {
 }
 
 // ---------------- game state ----------------
-let track, world, carTemplate, skids;
+let track, world, carTemplate, skids, guide;
 const audio = new GameAudio();
 const net = new Net();
 let racers = [];          // locally simulated (player + AI)
@@ -159,6 +160,7 @@ addEventListener('keydown', (e) => {
   if (e.code === 'KeyL') { settings.labels = !settings.labels; world.setLabelsVisible(settings.labels); saveSettings(); }
   if (e.code === 'KeyM') audio.setMuted(!audio.muted);
   if (e.code === 'KeyT') { settings.tc = !settings.tc; if (player) player.car.tc = settings.tc; toast(settings.tc ? '循跡控制 ON' : '循跡控制 OFF'); saveSettings(); }
+  if (e.code === 'KeyG') { settings.guide = !settings.guide; toast(settings.guide ? '導引線 ON' : '導引線 OFF'); saveSettings(); }
   if (e.code === 'Escape') togglePause();
 });
 addEventListener('keyup', (e) => { keys[e.code] = false; });
@@ -296,7 +298,7 @@ function startRace(type, opts = {}) {
     for (let k = 0; k < n; k++) {
       const r = new Racer('AI ' + AI_NAMES[k % AI_NAMES.length], COLORS[(settings.color + k + 1) % COLORS.length], false);
       r.place(world.gridSlot(k));
-      r.ai = new AIDriver(r, track, 0.86 + (k / Math.max(1, n - 1)) * 0.1 * (n > 1 ? 1 : 0) + Math.random() * 0.02, r.lateral);
+      r.ai = new AIDriver(r, track, 0.86 + (k / Math.max(1, n - 1)) * 0.1 * (n > 1 ? 1 : 0) + Math.random() * 0.02);
       racers.push(r);
     }
     player = new Racer(settings.name, COLORS[settings.color], true);
@@ -433,6 +435,7 @@ function updateHUD(dt) {
   $('wrongway').classList.toggle('hidden', player.wrongWay < 1.5);
   $('surface').textContent = c.surface === 'grass' ? '草地' : c.surface === 'water' ? '落水！' : '';
   $('tc').classList.toggle('off', !c.tc);
+  $('tc').classList.toggle('active', c.tc && c.assistActive);
   drawMinimap();
 }
 
@@ -507,6 +510,7 @@ function draw(dt, now) {
   }
   updateCamera(dt);
   world.updateLabels(camera.position);
+  guide.update(player?.car, player?.s ?? 0, !!player && settings.guide && mode !== 'menu' && player.finishTime === null);
   if (player) {
     const p = player.car, snap = 2 * SH / sunLight.shadow.mapSize.x;
     const cx = Math.round(p.x / snap) * snap, cz = Math.round(p.z / snap) * snap;
@@ -637,6 +641,7 @@ async function boot() {
   world = new World(scene, campus, track, settings.quality);
   world.setLabelsVisible(settings.labels);
   skids = new SkidMarks();
+  guide = new DrivingLine(scene, track, TRACK_Y + 0.045);
   setLoad('載入賽車模型…', 0.25);
   carTemplate = await loadCarTemplate('assets/mclaren_p1.glb', (p) => setLoad('載入賽車模型…', 0.25 + p * 0.7));
   setLoad('完成', 1);
@@ -657,9 +662,9 @@ boot().catch((e) => { console.error(e); $('loadText').textContent = '載入失�
 // expose for debugging in the console
 window.__game = {
   get player() { return player; }, get racers() { return racers; }, get track() { return track; }, get mode() { return mode; },
-  get raceTime() { return raceTime; }, get world() { return world; }, get remotes() { return remotes; }, net, startRace, settings,
+  get raceTime() { return raceTime; }, get world() { return world; }, get remotes() { return remotes; }, get guide() { return guide; }, renderer, camera, net, startRace, settings,
   // advance the game without rendering (works while the tab is hidden)
   simulate(seconds, step = 1 / 60) { for (let t = 0; t < seconds; t += step) advance(step); },
-  autopilot(skill = 0.95) { player.ai = new AIDriver(player, track, skill, player.lateral); },
+  autopilot(skill = 0.95) { player.ai = new AIDriver(player, track, skill); },
   renderOnce(cam) { if (cam !== undefined) camMode = cam; for (let i = 0; i < 30; i++) draw(1 / 30, performance.now()); },
 };

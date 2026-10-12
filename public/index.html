@@ -67,6 +67,7 @@
   .flags { position: absolute; left: 16px; bottom: 18px; font-size: 12px; color: #d7ddd8; display: flex; gap: 8px; }
   .flags span { background: var(--panel); padding: 4px 8px; border-radius: 6px; }
   #tc.off { opacity: 0.45; text-decoration: line-through; }
+  #tc.active { background: #e8b02a; color: #111; }
   #countdown { position: absolute; top: 30%; width: 100%; text-align: center; font-size: 140px; font-weight: 900; color: #fff;
     text-shadow: 0 6px 30px rgba(0,0,0,0.6); }
   #toast { position: absolute; top: 18%; width: 100%; text-align: center; font-size: 28px; font-weight: 700; text-shadow: 0 3px 14px rgba(0,0,0,0.8); }
@@ -122,7 +123,8 @@
         <kbd>W / ↑</kbd><span>油門</span><kbd>S / ↓</kbd><span>煞車／倒車</span>
         <kbd>A D / ← →</kbd><span>轉向</span><kbd>空白鍵</kbd><span>手煞車（甩尾）</span>
         <kbd>C</kbd><span>切換視角</span><kbd>R</kbd><span>回到賽道</span>
-        <kbd>T</kbd><span>循跡控制開關</span><kbd>L</kbd><span>建築名稱標籤</span>
+        <kbd>T</kbd><span>循跡／車身穩定控制開關</span><kbd>G</kbd><span>導引線（綠：全油門、黃：鬆油門、紅：煞車）</span>
+        <kbd>L</kbd><span>建築名稱標籤</span>
         <kbd>M</kbd><span>靜音</span><kbd>Esc</kbd><span>暫停</span>
       </div>
       <div style="margin-top:6px">也支援遊戲手把（RT 油門、LT 煞車、A 手煞車）。</div>
@@ -175,7 +177,7 @@
     <span id="speed">0</span><span class="unit"> km/h</span><span id="gear">N</span>
     <div class="rpm"><div id="rpmbar"></div></div>
   </div>
-  <div class="flags"><span id="tc">TC 循跡控制</span><span>C 視角 · R 回賽道 · Esc 暫停</span></div>
+  <div class="flags"><span id="tc">TC 循跡控制</span><span>G 導引線 · C 視角 · R 回賽道 · Esc 暫停</span></div>
   <div id="countdown" class="hidden"></div>
   <div id="toast" class="hidden"></div>
   <div id="wrongway" class="hidden">⚠ 逆向行駛</div>
